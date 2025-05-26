@@ -58,7 +58,8 @@ def call(Map configMap){
                     aws eks update-kubeconfig --region us-east-1 --name expense-dev
                     cd helm
                     sed -i 's/IMAGE_VERSION/${appVersion}/g' values.yaml
-                    helm uprade --install ${component} -n ${project} .
+                    helm upgrade --install  ${component} -n expense . 
+                    
                     
                 """
             }

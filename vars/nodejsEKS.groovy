@@ -1,175 +1,188 @@
 def call(Map configMap){
+    pipeline {
+        agent {
+            label 'AGENT-1'
+        }
+        options{
+            timeout(time: 30, unit: 'MINUTES')
+            disableConcurrentBuilds()
+            //retry(1)
+        }
+        parameters{
+            booleanParam(name: 'deploy', defaultValue: false, description: 'Select to deploy or not')
+        }
+        environment {
+            appVersion = '' // this will become global, we can use across pipeline
+            region = 'us-east-1'
+            account_id = '905418111046'
+            project = configMap.get("project")
+            environment = 'dev'
+            component = configMap.get("component")
+        }
 
-pipeline {
-    agent {
-        label 'AGENT-1'
-    }
-    options {
-        timeout(time: 30, unit: 'MINUTES')
-        disableConcurrentBuilds()
-        ansiColor('xterm')
-    }
-
-    environment{
-        def appVersion = '' //variable declaration
-        nexusUrl = pipelineGlobals.nexusURL()
-        region = pipelineGlobals.region()
-        account_id = pipelineGlobals.account_id()
-        component = configMap.get("component")
-        project = configMap.get("project")
-        def releaseExists = ""        
-    }
-    stages {
-        stage('read the version'){
-            steps{
-                script{
-                    def packageJson = readJSON file: 'package.json'
-                    appVersion = packageJson.version
-                    echo "application version: $appVersion"
+        stages {
+            stage('Read the version') {
+                steps {
+                    script{
+                        def packageJson = readJSON file: 'package.json'
+                        appVersion = packageJson.version
+                        echo "App version: ${appVersion}"
+                    }
                 }
             }
-        }
-        stage('Install Dependencies') {
-            steps {
-               sh """
-                npm install
-                ls -ltr
-                echo "application version: $appVersion"
-               """
+            stage('Install Dependencies') {
+                steps {
+                    sh 'npm install'
+                }
             }
-        }
-        stage('Build'){
-            steps{
-                sh """
-                zip -q -r ${component}-${appVersion}.zip * -x Jenkinsfile -x ${component}-${appVersion}.zip
-                ls -ltr
-                """
+            /* stage('SonarQube analysis') {
+                environment {
+                    SCANNER_HOME = tool 'sonar-6.0' //scanner config
+                }
+            } */
+
+            stage('Docker build'){
+                steps{
+
+                    sh """
+                        aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${account_id}.dkr.ecr.${region}.amazonaws.com
+                        docker build -t ${account_id}.dkr.ecr.${region}.amazonaws.com/${project}-${component}:${appVersion} .
+                        docker push ${account_id}.dkr.ecr.${region}.amazonaws.com/${project}-${component}:${appVersion}
+                    """
+                }
             }
-        }
-        stage('Docker build'){
-            steps{
-                sh """
-                    aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${account_id}.dkr.ecr.${region}.amazonaws.com
 
-                    docker build -t ${account_id}.dkr.ecr.${region}.amazonaws.com/expense-${component}:${appVersion} .
-
-                    docker push ${account_id}.dkr.ecr.${region}.amazonaws.com/expense-${component}:${appVersion}                    
-                """
-            }
-        }
-
-        stage('Deploy'){
-            steps{
-                sh """
-                    aws eks update-kubeconfig --region us-east-1 --name expense-dev
-                    cd helm
-                    sed -i 's/IMAGE_VERSION/${appVersion}/g' values.yaml
-                    helm upgrade --install  ${component} -n expense .
-                """
-            }
-        }
-        
-        // stage('Sonar Scan'){
-        //     environment {
-        //         scannerHome = tool 'sonar-6.0' //referring scanner CLI
-        //     }
-        //     steps {
-        //         script {
-        //             withSonarQubeEnv('sonar-6.0') { //referring sonar server
-        //                 sh "${scannerHome}/bin/sonar-scanner"
-        //             }
-        //         }
-        //     }
-        // }
-
-        //  stage("Quality Gate") {
-        //     steps {
-        //       timeout(time: 30, unit: 'MINUTES') {
-        //         waitForQualityGate abortPipeline: true
-        //       }
-        //     }
-        // }
-
-        //  stage('Nexus Artifact Upload'){
-        //     steps{
-        //         script{
-        //             nexusArtifactUploader(
-        //                 nexusVersion: 'nexus3',
-        //                 protocol: 'http',
-        //                 nexusUrl: "${nexusUrl}",
-        //                 groupId: 'com.expense',
-        //                 version: "${appVersion}",
-        //                 repository: "backend",
-        //                 credentialsId: 'nexus-auth',
-        //                 artifacts: [
-        //                     [artifactId: "backend" ,
-        //                     classifier: '',
-        //                     file: "backend-" + "${appVersion}" + '.zip',
-        //                     type: 'zip']
-        //                 ]
-        //             )
-        //         }
-        //     }
-        // }
-        // stage('Deploy'){
-        //     when{
-        //         expression{
-        //             params.deploy
-        //         }
-        //     }
-        //     steps{
-        //         script{
-        //             def params = [
-        //                 string(name: 'appVersion', value: "${appVersion}")
-        //             ]
-        //             build job: 'backend-deploy', parameters: params, wait: false
-        //         }
-        //     }
-        // }
-        stage('Verify Deployment'){
-            steps{
-                script{
-                    rollbackStatus = sh(script: "kubectl rollout status deployment/backend -n ${project} --timeout=1m || true", returnStdout: true).trim()
-                    if(rollbackStatus.contains('successfully rolled out')){
-                        echo "Deployment is successfull"
-                    }
-                    else{
-                        echo "Deployment is failed, performing rollback"
+            stage('Deploy'){
+                steps{
+                    script{
+                        releaseExists = sh(script: "helm list -A --short | grep -w ${component} || true", returnStdout: true).trim()
                         if(releaseExists.isEmpty()){
-                            error "Deployment failed, not able to rollback, since it is first time deployment"
+                            echo "${component} not installed yet, first time installation"
+                            sh"""
+                                aws eks update-kubeconfig --region ${region} --name ${project}-dev
+                                cd helm
+                                sed -i 's/IMAGE_VERSION/${appVersion}/g' values.yaml
+                                helm install ${component} -n ${project} .
+                            """
                         }
                         else{
-                            sh """
-                            aws eks update-kubeconfig --region ${region} --name ${project}-dev
-                            helm rollback backend -n ${project} 0
-                            sleep 60
+                            echo "${component} exists, running upgrade"
+                            sh"""
+                                aws eks update-kubeconfig --region ${region} --name ${project}-dev
+                                cd helm
+                                sed -i 's/IMAGE_VERSION/${appVersion}/g' values.yaml
+                                helm upgrade --install ${component} -n ${project} .
                             """
-                            rollbackStatus = sh(script: "kubectl rollout status deployment/backend -n expense --timeout=2m || true", returnStdout: true).trim()
-                            if(rollbackStatus.contains('successfully rolled out')){
-                                error "Deployment is failed, Rollback is successfull"
-                            }
-                            else{
-                                error "Deployment is failed, Rollback is failed"
-                            }
                         }
                     }
                 }
+            }  
+            // stage('Verify Deployment'){
+            //     steps{
+            //         script{
+            //             rollbackStatus = sh(script: "kubectl rollout status deployment/backend -n ${project} --timeout=1m || true", returnStdout: true).trim()
+            //             if(rollbackStatus.contains('successfully rolled out')){
+            //                 echo "Deployment is successfull"
+            //             }
+            //             else{
+            //                 echo "Deployment is failed, performing rollback"
+            //                 if(releaseExists.isEmpty()){
+            //                     error "Deployment failed, not able to rollback, since it is first time deployment"
+            //                 }
+            //                 else{
+            //                     sh """
+            //                     aws eks update-kubeconfig --region ${region} --name ${project}-dev
+            //                     helm rollback --install backend -n ${project} 0
+            //                     sleep 60
+            //                     """
+            //                     rollbackStatus = sh(script: "kubectl rollout status deployment/backend -n expense --timeout=2m || true", returnStdout: true).trim()
+            //                     if(rollbackStatus.contains('successfully rolled out')){
+            //                         error "Deployment is failed, Rollback is successfull"
+            //                     }
+            //                     else{
+            //                         error "Deployment is failed, Rollback is failed"
+            //                     }
+            //                 }
+            //             }
+            //         }
+            //     }
+            // }
+            
+            /* stage('Nexus Artifact Upload'){
+                steps{
+                    script{
+                        nexusArtifactUploader(
+                            nexusVersion: 'nexus3',
+                            protocol: 'http',
+                            nexusUrl: "${nexusUrl}",
+                            groupId: 'com.expense',
+                            version: "${appVersion}",
+                            repository: "backend",
+                            credentialsId: 'nexus-auth',
+                            artifacts: [
+                                [artifactId: "backend" ,
+                                classifier: '',
+                                file: "backend-" + "${appVersion}" + '.zip',
+                                type: 'zip']
+                            ]
+                        )
+                steps {
+                    // sonar server injection
+                    withSonarQubeEnv('sonar-6.0') {
+                        sh '$SCANNER_HOME/bin/sonar-scanner'
+                        //generic scanner, it automatically understands the language and provide scan results
+                    }
+                }
+            }
+
+            stage('Quality Gate') {
+                steps {
+                    timeout(time: 5, unit: 'MINUTES') {
+                        waitForQualityGate abortPipeline: true
+                    }
+                }
+            } */
+            // stage('Docker build') {
+                
+            //     steps {
+            //         withAWS(region: 'us-east-1', credentials: "aws-creds-${environment}") {
+            //             sh """
+            //             aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${account_id}.dkr.ecr.us-east-1.amazonaws.com
+
+            //             docker build -t ${account_id}.dkr.ecr.us-east-1.amazonaws.com/${project}/${environment}/${component}:${appVersion} .
+
+            //             docker images
+
+            //             docker push ${account_id}.dkr.ecr.us-east-1.amazonaws.com/${project}/${environment}/${component}:${appVersion}
+            //             """
+            //         }
+            //     }
+            // }
+            // stage('Deploy'){
+            //     when{
+            //         expression {params.deploy}
+            //     }
+
+            //     steps{
+            //         build job: "../${component}-cd", parameters: [
+            //             string(name: 'version', value: "$appVersion"),
+            //             string(name: 'ENVIRONMENT', value: "dev"),
+            //         ], wait: true
+            //     }
+            // }
+        }
+
+        post {
+            always{
+                echo "This sections runs always"
+                deleteDir()
+            }
+            success{
+                echo "This section run when pipeline success"
+            }
+            failure{
+                echo "This section run when pipeline failure"
             }
         }
-                    
     }
-    post { 
-        always { 
-            echo 'I will always say Hello again!'
-            deleteDir()
-        }
-        success { 
-            echo 'I will run when pipeline is success'
-        }
-        failure { 
-            echo 'I will run when pipeline is failure'
-        }
-    }
-}      
-
 }

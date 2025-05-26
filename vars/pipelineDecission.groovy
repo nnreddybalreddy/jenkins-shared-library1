@@ -7,9 +7,12 @@ def decidePipeline(Map configMap) {
         case "nodejsEKS":
             nodejsEKS(configMap)
             break
-        case "nodejsVM":
-            nodejsVM(configMap)
+        case "javaEKS":
+            javaEKS(configMap)
             break
+        case "pythonEKS":
+            pythonEKS(configMap)
+            break               
         default:
             error "type is not matched" 
             break

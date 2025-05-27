@@ -52,6 +52,8 @@ def call(Map configMap){
                 }
             }
 
+    // Use below deploy for normal jenkins pipelin        
+
         stage('Deploy'){
             steps{
                 sh """
